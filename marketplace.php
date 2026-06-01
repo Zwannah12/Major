@@ -2,6 +2,7 @@
 // Include config file and functions
 require_once "includes/db.php";
 require_once "includes/functions.php";
+require_once "includes/security.php";
 
 // Start session if not already started
 if (session_status() == PHP_SESSION_NONE) {
@@ -14,13 +15,18 @@ if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true) {
     exit;
 }
 
+$csrf_token = get_csrf_token();
+
 // Check if the user is a buyer, or allow all roles to browse but only buyers to order
 $user_role = $_SESSION["role"];
 $buyer_id = ($user_role == 'buyer') ? $_SESSION['id'] : null;
 
 // Handle Place Order
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['action'] == 'place_order') {
-    if ($user_role !== 'buyer') {
+    // Validate CSRF token
+    if (empty($_POST['csrf_token']) || !validate_csrf_token($_POST['csrf_token'])) {
+        $_SESSION['error_message'] = "Security token validation failed. Please try again.";
+    } else if ($user_role !== 'buyer') {
         $_SESSION['error_message'] = "Only buyers can place orders.";
     } else {
         $crop_id = sanitize_input($_POST['crop_id']);
@@ -49,6 +55,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
                         if ($stmt_insert_order = mysqli_prepare($link, $sql_insert_order)) {
                             mysqli_stmt_bind_param($stmt_insert_order, "iidd", $buyer_id, $crop_id, $order_quantity, $total_price);
                             if (mysqli_stmt_execute($stmt_insert_order)) {
+                                $order_id = mysqli_insert_id($link);
+
                                 // Update crop quantity
                                 $sql_update_crop = "UPDATE crops SET quantity = quantity - ? WHERE id = ?";
                                 if ($stmt_update_crop = mysqli_prepare($link, $sql_update_crop)) {
@@ -56,7 +64,23 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
                                     mysqli_stmt_execute($stmt_update_crop);
                                     mysqli_stmt_close($stmt_update_crop);
                                 }
-                                $_SESSION['success_message'] = "Order placed successfully!";
+
+                                // Notify Farmer
+                                $farmer_id_notif = 0;
+                                $crop_name_notif = "";
+                                $sql_f = "SELECT farmer_id, crop_name FROM crops WHERE id = ?";
+                                if($stmt_f = mysqli_prepare($link, $sql_f)) {
+                                    mysqli_stmt_bind_param($stmt_f, "i", $crop_id);
+                                    mysqli_stmt_execute($stmt_f);
+                                    mysqli_stmt_bind_result($stmt_f, $farmer_id_notif, $crop_name_notif);
+                                    mysqli_stmt_fetch($stmt_f);
+                                    mysqli_stmt_close($stmt_f);
+                                }
+                                create_notification($link, $farmer_id_notif, "New order received for $order_quantity units of $crop_name_notif!", "farmer.php#buyerOrders");
+
+                                $_SESSION['success_message'] = "Order placed successfully! Please complete the payment.";
+                                header("location: payment.php?order_id=" . $order_id);
+                                exit();
                             } else {
                                 $_SESSION['error_message'] = "Error placing order: " . mysqli_error($link);
                             }
@@ -81,8 +105,8 @@ $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $offset = ($page - 1) * $limit;
 
 // Build query for fetching crops
-$sql_query = "SELECT c.id, c.crop_name, c.quantity, c.price, c.location, c.harvest_date, c.image, u.name as farmer_name 
-              FROM crops c JOIN users u ON c.farmer_id = u.id WHERE 1=1";
+$sql_query = "SELECT c.id, c.crop_name, c.quantity, c.price, c.location, c.harvest_date, c.image, u.name as farmer_name, c.farmer_id 
+              FROM crops c JOIN users u ON c.farmer_id = u.id WHERE c.status = 'approved'";
 $params = [];
 $types = "";
 
@@ -118,7 +142,7 @@ if (isset($_GET['location']) && !empty(trim($_GET['location']))) {
 $sql_query .= " ORDER BY c.created_at DESC";
 
 // Get total number of crops for pagination
-$sql_count = "SELECT COUNT(*) FROM crops c JOIN users u ON c.farmer_id = u.id WHERE 1=1";
+$sql_count = "SELECT COUNT(*) FROM crops c JOIN users u ON c.farmer_id = u.id WHERE c.status = 'approved'";
 if (isset($_GET['search']) && !empty(trim($_GET['search']))) {
     $sql_count .= " AND (c.crop_name LIKE ? OR c.location LIKE ? OR u.name LIKE ?)";
 }
@@ -178,7 +202,7 @@ mysqli_close($link);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Marketplace - AgroSphere MarketLink</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="assets/css/style.css">
+    <link rel="stylesheet" href="assets/css/style.css?v=modern-ui-2">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 </head>
 <body>
@@ -281,13 +305,22 @@ mysqli_close($link);
                                         <p class="card-text"><small class="text-info">Location: <?php echo htmlspecialchars($crop['location']); ?></small></p>
                                         <p class="card-text"><small class="text-secondary">Harvest: <?php echo htmlspecialchars($crop['harvest_date']); ?></small></p>
                                         <?php if ($user_role === 'buyer' && $crop['quantity'] > 0): ?>
-                                            <button type="button" class="btn btn-success btn-sm w-100 mt-2" data-bs-toggle="modal" data-bs-target="#placeOrderModal"
-                                                data-crop_id="<?php echo $crop['id']; ?>"
-                                                data-crop_name="<?php echo htmlspecialchars($crop['crop_name']); ?>"
-                                                data-crop_price="<?php echo htmlspecialchars($crop['price']); ?>"
-                                                data-available_quantity="<?php echo htmlspecialchars($crop['quantity']); ?>">
-                                                <i class="fas fa-shopping-cart"></i> Place Order
-                                            </button>
+                                            <div class="row g-2">
+                                                <div class="col-8">
+                                                    <button type="button" class="btn btn-success btn-sm w-100 mt-2" data-bs-toggle="modal" data-bs-target="#placeOrderModal"
+                                                        data-crop_id="<?php echo $crop['id']; ?>"
+                                                        data-crop_name="<?php echo htmlspecialchars($crop['crop_name']); ?>"
+                                                        data-crop_price="<?php echo htmlspecialchars($crop['price']); ?>"
+                                                        data-available_quantity="<?php echo htmlspecialchars($crop['quantity']); ?>">
+                                                        <i class="fas fa-shopping-cart"></i> Place Order
+                                                    </button>
+                                                </div>
+                                                <div class="col-4">
+                                                    <a href="chat.php?user_id=<?php echo $crop['farmer_id']; ?>" class="btn btn-outline-success btn-sm w-100 mt-2" title="Chat with Farmer">
+                                                        <i class="fas fa-comments"></i>
+                                                    </a>
+                                                </div>
+                                            </div>
                                         <?php elseif ($crop['quantity'] <= 0): ?>
                                             <button type="button" class="btn btn-secondary btn-sm w-100 mt-2" disabled>Out of Stock</button>
                                         <?php else: ?>
@@ -333,10 +366,10 @@ mysqli_close($link);
             <div class="modal-content">
                 <div class="modal-header bg-success text-white">
                     <h5 class="modal-title" id="placeOrderModalLabel">Place Order</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
-                    <form action="marketplace.php" method="post">
+                    <form id="placeOrderForm" action="marketplace.php" method="post">
                         <input type="hidden" name="action" value="place_order">
                         <input type="hidden" name="crop_id" id="order_crop_id">
                         <input type="hidden" name="crop_price" id="order_crop_price">
@@ -347,11 +380,11 @@ mysqli_close($link);
                             <label for="order_quantity" class="form-label">Quantity to Order</label>
                             <input type="number" name="order_quantity" id="order_quantity" class="form-control" min="1" required>
                         </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                            <button type="submit" class="btn btn-success">Confirm Order</button>
-                        </div>
                     </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" form="placeOrderForm" class="btn btn-success">Confirm Order</button>
                 </div>
             </div>
         </div>
@@ -364,7 +397,7 @@ mysqli_close($link);
     </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="assets/js/main.js"></script>
+    <script src="assets/js/main.js?v=modern-ui-2"></script>
     <script>
         // Populate Place Order Modal
         var placeOrderModal = document.getElementById('placeOrderModal');

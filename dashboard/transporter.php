@@ -68,6 +68,23 @@ if (isset($_POST['action']) && $_POST['action'] == 'update_delivery_status') {
                 mysqli_stmt_close($stmt_update_order_status);
             }
             $_SESSION['success_message'] = "Status updated to " . ucfirst($new_status);
+            
+            // Notify Buyer and Farmer
+            $buyer_id_notif = 0;
+            $farmer_id_notif = 0;
+            $crop_name_notif = "";
+            $sql_info = "SELECT o.buyer_id, c.farmer_id, c.crop_name FROM orders o JOIN crops c ON o.crop_id = c.id WHERE o.id = ?";
+            if($stmt_info = mysqli_prepare($link, $sql_info)) {
+                mysqli_stmt_bind_param($stmt_info, "i", $order_id_for_status);
+                mysqli_stmt_execute($stmt_info);
+                mysqli_stmt_bind_result($stmt_info, $buyer_id_notif, $farmer_id_notif, $crop_name_notif);
+                mysqli_stmt_fetch($stmt_info);
+                mysqli_stmt_close($stmt_info);
+            }
+            
+            $notif_msg = "Order #$order_id_for_status ($crop_name_notif) is now $new_status.";
+            create_notification($link, $buyer_id_notif, $notif_msg, "buyer.php#myOrders");
+            create_notification($link, $farmer_id_notif, $notif_msg, "farmer.php#buyerOrders");
         }
         mysqli_stmt_close($stmt_update_delivery);
     }
@@ -122,6 +139,42 @@ foreach($my_deliveries as $d) { if($d['delivery_status'] == 'delivered') $comple
 $active_delivery_count = 0;
 foreach($my_deliveries as $d) { if($d['delivery_status'] == 'in_progress') $active_delivery_count++; }
 
+// Notifications
+$unread_notifications = [];
+$sql_notif = "SELECT * FROM notifications WHERE user_id = ? AND is_read = FALSE ORDER BY created_at DESC";
+if ($stmt_notif = mysqli_prepare($link, $sql_notif)) {
+    mysqli_stmt_bind_param($stmt_notif, "i", $transporter_id);
+    mysqli_stmt_execute($stmt_notif);
+    $res_notif = mysqli_stmt_get_result($stmt_notif);
+    while ($row = mysqli_fetch_assoc($res_notif)) { $unread_notifications[] = $row; }
+    mysqli_stmt_close($stmt_notif);
+}
+
+// Fetch Latest Announcement (for transporters)
+$latest_announcement = null;
+// Try with target_audience column if it exists
+$sql_check = "SHOW COLUMNS FROM announcements LIKE 'target_audience'";
+if (mysqli_num_rows(mysqli_query($link, $sql_check)) > 0) {
+    $sql_ann = "SELECT * FROM announcements WHERE FIND_IN_SET('transporter', target_audience) > 0 ORDER BY created_at DESC LIMIT 1";
+} else {
+    $sql_ann = "SELECT * FROM announcements ORDER BY created_at DESC LIMIT 1";
+}
+if ($res_ann = mysqli_query($link, $sql_ann)) {
+    $latest_announcement = mysqli_fetch_assoc($res_ann);
+}
+
+// Mark All as Read
+if (isset($_GET['mark_all_read'])) {
+    $sql_mr = "UPDATE notifications SET is_read = TRUE WHERE user_id = ?";
+    if ($stmt_mr = mysqli_prepare($link, $sql_mr)) {
+        mysqli_stmt_bind_param($stmt_mr, "i", $transporter_id);
+        mysqli_stmt_execute($stmt_mr);
+        mysqli_stmt_close($stmt_mr);
+        header("location: transporter.php");
+        exit();
+    }
+}
+
 mysqli_close($link);
 ?>
 <!DOCTYPE html>
@@ -131,7 +184,7 @@ mysqli_close($link);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Transporter Dashboard - AgroSphere</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="../assets/css/style.css">
+    <link rel="stylesheet" href="../assets/css/style.css?v=modern-ui-2">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 </head>
 <body>
@@ -151,6 +204,12 @@ mysqli_close($link);
                 <a href="#myDeliveries" class="list-group-item list-group-item-action">
                     <i class="fas fa-truck-loading"></i> My Deliveries
                 </a>
+                <a href="../contact_admin.php" class="list-group-item list-group-item-action">
+                    <i class="fas fa-envelope"></i> Contact Support
+                </a>
+                <a href="../profile.php" class="list-group-item list-group-item-action">
+                    <i class="fas fa-user-cog"></i> Profile Settings
+                </a>
                 <a href="../logout.php" class="list-group-item list-group-item-action text-danger mt-5">
                     <i class="fas fa-sign-out-alt"></i> Logout
                 </a>
@@ -165,7 +224,35 @@ mysqli_close($link);
                         <i class="fas fa-bars"></i>
                     </button>
                     <div class="ms-3 fw-bold text-success d-none d-sm-block">TRANSPORTER PANEL</div>
-                    <div class="ms-auto">
+                    <div class="ms-auto d-flex align-items-center">
+                        <div class="dropdown me-3">
+                            <button class="btn btn-light position-relative" type="button" id="notificationDropdown" data-bs-toggle="dropdown">
+                                <i class="fas fa-bell text-success"></i>
+                                <?php if(count($unread_notifications) > 0): ?>
+                                    <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+                                        <?php echo count($unread_notifications); ?>
+                                    </span>
+                                <?php endif; ?>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow border-0" style="width: 300px; max-height: 400px; overflow-y: auto;">
+                                <li class="p-2 border-bottom d-flex justify-content-between align-items-center">
+                                    <span class="fw-bold">Notifications</span>
+                                    <a href="?mark_all_read=1" class="small text-decoration-none">Mark all read</a>
+                                </li>
+                                <?php if(empty($unread_notifications)): ?>
+                                    <li class="p-3 text-center text-muted small">No new notifications</li>
+                                <?php else: ?>
+                                    <?php foreach($unread_notifications as $n): ?>
+                                        <li>
+                                            <a class="dropdown-item p-3 border-bottom text-wrap" href="<?php echo $n['link']; ?>">
+                                                <div class="small mb-1"><?php echo htmlspecialchars($n['message']); ?></div>
+                                                <div class="smaller text-muted"><?php echo date('M d, H:i', strtotime($n['created_at'])); ?></div>
+                                            </a>
+                                        </li>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </ul>
+                        </div>
                         <span class="badge bg-success-custom text-white p-2">
                             <i class="fas fa-truck me-1"></i> Transporter: <?php echo htmlspecialchars($_SESSION["name"]); ?>
                         </span>
@@ -174,9 +261,28 @@ mysqli_close($link);
             </nav>
 
             <div class="container-fluid p-4 animated-fade-in">
-                <div class="d-flex justify-content-between align-items-center mb-4">
-                    <h1 class="h3 mb-0 text-gray-800">Logistics Overview</h1>
-                    <div class="text-muted small"><?php echo date('F d, Y'); ?></div>
+                <div class="dashboard-hero">
+                    <div class="row align-items-end g-4">
+                        <div class="col-lg-8">
+                            <div class="dashboard-eyebrow">Transporter workspace</div>
+                            <h1 class="dashboard-title">Coordinate assigned deliveries faster.</h1>
+                            <p class="dashboard-subtitle">Accept new delivery assignments, update route status, and keep farmers and buyers informed.</p>
+                            <div class="dashboard-chip-row">
+                                <span class="dashboard-chip"><i class="fas fa-bell"></i><strong><?php echo count($delivery_requests); ?></strong> Requests</span>
+                                <span class="dashboard-chip"><i class="fas fa-shipping-fast"></i><strong><?php echo $active_delivery_count; ?></strong> In progress</span>
+                                <span class="dashboard-chip"><i class="fas fa-check-circle"></i><strong><?php echo $completed_count; ?></strong> Completed</span>
+                            </div>
+                        </div>
+                        <div class="col-lg-4">
+                            <div class="dashboard-action-panel ms-lg-auto">
+                                <div class="small opacity-75 mb-2">Today</div>
+                                <div class="h5 fw-bold mb-3"><?php echo date('F d, Y'); ?></div>
+                                <a href="#deliveryRequests" class="btn btn-warning w-100 fw-bold">
+                                    <i class="fas fa-route me-2"></i>View Assignments
+                                </a>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <?php if (!$is_verified): ?>
@@ -201,6 +307,19 @@ mysqli_close($link);
                     unset($_SESSION['error_message']);
                 }
                 ?>
+
+                <!-- Platform Announcement -->
+                <?php if ($latest_announcement): ?>
+                    <div class="card shadow-sm border-0 mb-4 bg-primary text-white overflow-hidden">
+                        <div class="card-body p-4 position-relative">
+                            <div style="position: absolute; right: -20px; top: -20px; font-size: 100px; opacity: 0.1; transform: rotate(15deg);">
+                                <i class="fas fa-bullhorn"></i>
+                            </div>
+                            <h5 class="fw-bold mb-1"><i class="fas fa-bullhorn me-2"></i><?php echo htmlspecialchars($latest_announcement['title']); ?></h5>
+                            <p class="mb-0 opacity-90"><?php echo htmlspecialchars($latest_announcement['message']); ?></p>
+                        </div>
+                    </div>
+                <?php endif; ?>
 
                 <!-- Stats Cards -->
                 <div class="row mb-4">
@@ -379,7 +498,7 @@ mysqli_close($link);
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="../assets/js/jquery-3.6.0.min.js"></script>
-    <script src="../assets/js/main.js"></script>
+    <script src="../assets/js/main.js?v=modern-ui-2"></script>
     <script>
         $("#menu-toggle").click(function(e) { e.preventDefault(); $("#wrapper").toggleClass("toggled"); });
         var updateStatusModal = document.getElementById('updateStatusModal');
