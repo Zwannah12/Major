@@ -1,16 +1,13 @@
 <?php
-// Database connection using environment variables (Back4App compatible)
+$host = getenv("MYSQLHOST");
+$user = getenv("MYSQLUSER");
+$pass = getenv("MYSQLPASSWORD");
+$db   = getenv("MYSQLDATABASE");
+$port = getenv("MYSQLPORT");
 
-define('DB_SERVER', getenv('DB_HOST'));
-define('DB_USERNAME', getenv('DB_USER'));
-define('DB_PASSWORD', getenv('DB_PASS'));
-define('DB_NAME', getenv('DB_NAME'));
+$link = mysqli_connect($host, $user, $pass, $db, $port);
 
-// Attempt to connect to MySQL database
-$link = mysqli_connect(DB_SERVER, DB_USERNAME, DB_PASSWORD, DB_NAME);
-
-// Check connection
-if ($link === false) {
-    die("ERROR: Could not connect. " . mysqli_connect_error());
+if (!$link) {
+    die("Database connection failed: " . mysqli_connect_error());
 }
 ?>
